@@ -48,10 +48,10 @@ class SharePointBackend(object):
 
     def create_user(self, email):
         if USER_CREATION:
-            return self.User.objects.create_user(
-                username=self.username_generator(email),
-                email=email,
-            )
+            username_field = getattr(self.User, 'USERNAME_FIELD', 'username')
+            user_kwargs = {'email': email}
+            user_kwargs[username_field] = self.username_generator(email)
+            return self.User.objects.create_user(**user_kwargs)
         else:
             return None
 
