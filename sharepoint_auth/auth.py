@@ -1,3 +1,4 @@
+from base64 import urlsafe_b64encode
 from django.conf import settings
 try:
     from django.contrib.auth import get_user_model
@@ -6,17 +7,16 @@ except ImportError:
 
     def get_user_model(*args, **kwargs):
         return User
-from hashlib import md5
+from hashlib import sha1
 from lxml import etree
 from lxml.objectify import ElementMaker
 import requests
 
 
-SHAREPOINT_URL = getattr(settings, 'SHAREPOINT_URL')
-USER_CREATION = getattr(settings, 'SHAREPOINT_USER_CREATION', True)
+USER_CREATION = getattr(settings, 'AD_USER_CREATION', True)
 
 
-class SharePointBackend(object):
+class ActiveDirectoryBackend(object):
     supports_anonymous_user = False
     supports_inactive_user = True
     supports_object_permissions = False
@@ -25,11 +25,11 @@ class SharePointBackend(object):
         self.User = get_user_model()
 
     def authenticate(self, username, password):
-        envelope = self.get_envelope(username, password)
-        response = self.get_response(envelope)
+        ad_url, auth_uri = self.get_user_realm(username)
+        envelope = self.get_envelope(ad_url, auth_uri, username, password)
+        response = requests.post(ad_url, data=envelope, headers={'content-type': 'application/soap+xml'})
         if response.ok:
-            token = self.parse_token(response.content)
-            if token is not None:
+            if self.has_token(response.content):
                 users = self.User.objects.filter(email=username)
                 if len(users) > 1:
                     return None
@@ -57,72 +57,99 @@ class SharePointBackend(object):
 
     @staticmethod
     def username_generator(email):
-        return md5(email).hexdigest()
+        return urlsafe_b64encode(sha1(email).digest()).rstrip(b'=')
 
-    def get_envelope(self, username, password):
-        NSMAP_1 = {
+    def get_user_realm(self, username):
+        ad_url = 'https://login.microsoftonline.com/extSTS.srf'
+        auth_uri = 'https://portal.microsoftonline.com'
+
+        params = {
+            'login': username,
+            'xml': 1,
+        }
+        response = requests.get('https://login.microsoftonline.com/GetUserRealm.srf', params=params)
+        if response.ok:
+            document = etree.fromstring(response.content)
+            name_space_type = document.xpath('//NameSpaceType')[0].text
+            if name_space_type == 'Federated':
+                ad_url = document.xpath('//STSAuthURL')[0].text
+                auth_uri = 'urn:federation:MicrosoftOnline'
+        return ad_url, auth_uri
+
+    def get_envelope(self, ad_url, auth_uri, username, password):
+        NSMAP = {
             's': 'http://www.w3.org/2003/05/soap-envelope',
-            'a': 'http://www.w3.org/2005/08/addressing',
-            'u': 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd',
-        }
-        NSMAP_2 = {
-            'o': 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd',
-        }
-        NSMAP_3 = {
-            't': 'http://schemas.xmlsoap.org/ws/2005/02/trust',
-        }
-        NSMAP_4 = {
+            'wsse': 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd',
             'wsp': 'http://schemas.xmlsoap.org/ws/2004/09/policy',
+            'wsu': 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd',
+            'wsa': 'http://www.w3.org/2005/08/addressing',
+            'wst': 'http://schemas.xmlsoap.org/ws/2005/02/trust'
         }
 
-        S = ElementMaker(namespace=NSMAP_1['s'], nsmap=NSMAP_1, annotate=False)
-        A = ElementMaker(namespace=NSMAP_1['a'], nsmap=NSMAP_1, annotate=False)
-        U = ElementMaker(namespace=NSMAP_1['u'], nsmap=NSMAP_1, annotate=False)
-        O = ElementMaker(namespace=NSMAP_2['o'], nsmap=NSMAP_2, annotate=False)
-        T = ElementMaker(namespace=NSMAP_3['t'], nsmap=NSMAP_3, annotate=False)
-        WSP = ElementMaker(namespace=NSMAP_4['wsp'], nsmap=NSMAP_4, annotate=False)
+        S = ElementMaker(
+            annotate=False,
+            namespace=NSMAP['s'],
+            nsmap=NSMAP,
+        )
 
+        WSSE = ElementMaker(
+            annotate=False,
+            namespace=NSMAP['wsse'],
+            nsmap=NSMAP,
+        )
 
+        WSP = ElementMaker(
+            annotate=False,
+            namespace=NSMAP['wsp'],
+            nsmap=NSMAP,
+        )
+
+        WSU = ElementMaker(
+            annotate=False,
+            namespace=NSMAP['wsu'],
+            nsmap=NSMAP,
+        )
+
+        WSA = ElementMaker(
+            annotate=False,
+            namespace=NSMAP['wsa'],
+            nsmap=NSMAP,
+        )
+
+        WST = ElementMaker(
+            annotate=False,
+            namespace=NSMAP['wst'],
+            nsmap=NSMAP,
+        )
 
         envelope = S.Envelope(
             S.Header(
-                A.Action('http://schemas.xmlsoap.org/ws/2005/02/trust/RST/Issue', mustUnderstand='1'),
-                A.ReplyTo(
-                    A.Address('http://www.w3.org/2005/08/addressing/anonymous'),
-                ),
-                A.To('https://login.microsoftonline.com/extSTS.srf', mustUnderstand='1'),
-                O.Security(
-                    O.UsernameToken(
-                        O.Username(username),
-                        O.Password(password),
+                WSA.Action('http://schemas.xmlsoap.org/ws/2005/02/trust/RST/Issue', mustUnderstand='1'),
+                WSA.To(ad_url, mustUnderstand='1'),
+                WSSE.Security(
+                    WSSE.UsernameToken(
+                        WSSE.Username(username),
+                        WSSE.Password(password),
                     ),
-                    mustUnderstand='1',
                 ),
             ),
             S.Body(
-                T.RequestSecurityToken(
+                WST.RequestSecurityToken(
+                    WST.RequestType('http://schemas.xmlsoap.org/ws/2005/02/trust/Issue'),
                     WSP.AppliesTo(
-                        A.EndpointReference(
-                            A.Address(SHAREPOINT_URL),
+                        WSA.EndpointReference(
+                            WSA.Address(auth_uri),
                         ),
                     ),
-                    T.KeyType('http://schemas.xmlsoap.org/ws/2005/05/identity/NoProofKey'),
-                    T.RequestType('http://schemas.xmlsoap.org/ws/2005/02/trust/Issue'),
-                    T.TokenType('urn:oasis:names:tc:SAML:1.0:assertion'),
+                    WST.KeyType('http://schemas.xmlsoap.org/ws/2005/05/identity/NoProofKey'),
+                    WST.TokenType('urn:oasis:names:tc:SAML:1.0:assertion'),
                 ),
             ),
         )
 
         return etree.tostring(envelope)
 
-    def get_response(self, envelope):
-        return requests.post('https://login.microsoftonline.com/extSTS.srf', data=envelope)
-
-    def parse_token(self, text):
+    def has_token(self, text):
         document = etree.fromstring(text)
-        results = document.xpath('//wsse:BinarySecurityToken',
-            namespaces={'wsse': 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd'})
-        if len(results):
-            return results[0].text
-        else:
-            return None
+        results = document.xpath('//wst:RequestedSecurityToken', namespaces={'wst': 'http://schemas.xmlsoap.org/ws/2005/02/trust'})
+        return len(results) > 0

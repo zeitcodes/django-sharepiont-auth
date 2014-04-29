@@ -46,10 +46,8 @@ MIDDLEWARE_CLASSES = (
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 )
 
-SHAREPOINT_URL = 'http://zeitcode.sharepoint.com'
-
 AUTHENTICATION_BACKENDS = (
-    'sharepoint_auth.auth.SharePointBackend',
+    'sharepoint_auth.auth.ActiveDirectoryBackend',
 )
 
 TEMPLATE_DIRS = (
