@@ -13,10 +13,12 @@ from lxml.objectify import ElementMaker
 import requests
 
 
-USER_CREATION = getattr(settings, 'AD_USER_CREATION', True)
-
-
 class ActiveDirectoryBackend(object):
+    USER_CREATION = getattr(settings, 'AD_USER_CREATION', True)
+    DOMAIN_WHITELIST = getattr(settings, 'AD_DOMAIN_WHITELIST', None)
+    DOMAIN_BLACKLIST = getattr(settings, 'AD_DOMAIN_BLACKLIST', [])
+
+
     supports_anonymous_user = False
     supports_inactive_user = True
     supports_object_permissions = False
@@ -25,6 +27,12 @@ class ActiveDirectoryBackend(object):
         self.User = get_user_model()
 
     def authenticate(self, username, password):
+        domain = username.split('@')[-1] if '@' in username else None
+        if domain is None \
+        or (self.DOMAIN_WHITELIST is not None and domain not in self.DOMAIN_WHITELIST) \
+        or domain in self.DOMAIN_BLACKLIST:
+            return None
+
         ad_url, auth_uri = self.get_user_realm(username)
         envelope = self.get_envelope(ad_url, auth_uri, username, password)
         response = requests.post(ad_url, data=envelope, headers={'content-type': 'application/soap+xml'})
@@ -47,7 +55,7 @@ class ActiveDirectoryBackend(object):
             return None
 
     def create_user(self, email):
-        if USER_CREATION:
+        if self.USER_CREATION:
             username_field = getattr(self.User, 'USERNAME_FIELD', 'username')
             user_kwargs = {'email': email}
             user_kwargs[username_field] = self.username_generator(email)
